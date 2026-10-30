@@ -269,7 +269,7 @@ void SDL_EMFS_OpenAsync(SDL_EMFS_Context *context, SDL_EMFS_Root root, const cha
 #else
 #ifdef SDL_PLATFORM_WIIU
     if (asset) {
-        file->wiiu_asset = SDL_EMFS_WiiUOpenAsyncAsset(context->assets.find(normalized)->second);
+        file->wiiu_asset = SDL_EMFS_WiiUOpenAsyncAsset(context, context->assets.find(normalized)->second);
         if (file->wiiu_asset) {
             callback(userdata, file);
             return;

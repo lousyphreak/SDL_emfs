@@ -86,6 +86,9 @@ struct SDL_EMFS_Context
     std::unordered_map<std::string, SDL_EMFS_AssetDirectory> asset_directories;
     std::unordered_map<std::string, std::string> user_paths;
     std::mutex user_paths_lock;
+#ifdef SDL_PLATFORM_WIIU
+    std::mutex asset_metadata_lock;
+#endif
 
     bool initialization_complete = false;
     bool ready = false;
@@ -152,15 +155,15 @@ bool SDL_EMFS_IsWritableMode(const char *mode);
 bool SDL_EMFS_IsPreservingMode(const char *mode);
 
 #ifdef SDL_PLATFORM_WIIU
-SDL_IOStream *SDL_EMFS_WiiUOpenAsset(const SDL_EMFS_AssetEntry &entry);
-void *SDL_EMFS_WiiUOpenAsyncAsset(const SDL_EMFS_AssetEntry &entry);
+SDL_IOStream *SDL_EMFS_WiiUOpenAsset(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &entry);
+void *SDL_EMFS_WiiUOpenAsyncAsset(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &entry);
 bool SDL_EMFS_WiiULoadAsync(SDL_EMFS_AsyncOperation *operation, const SDL_EMFS_AssetEntry &entry);
 void SDL_EMFS_WiiUReadAsync(SDL_EMFS_AsyncOperation *operation, Uint64 offset);
 bool SDL_EMFS_WiiUCloseAsyncAsset(void *asset);
 void SDL_EMFS_QueueCompletion(SDL_EMFS_Context *context, SDL_EMFS_AsyncOperation *operation);
 #endif
-SDL_IOStream *SDL_EMFS_OpenAssetStream(const SDL_EMFS_AssetEntry &entry, const char *mode);
-void *SDL_EMFS_LoadAsset(const SDL_EMFS_AssetEntry &entry, size_t *size);
+SDL_IOStream *SDL_EMFS_OpenAssetStream(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &entry, const char *mode);
+void *SDL_EMFS_LoadAsset(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &entry, size_t *size);
 
 SDL_EMFS_File *SDL_EMFS_OpenResolved(SDL_EMFS_Context *context, SDL_EMFS_Root root, const std::string &path, const char *mode);
 bool SDL_EMFS_PrepareOpen(SDL_EMFS_Context *context, SDL_EMFS_Root root, const std::string &path, const char *mode, bool &asset, std::string &physical_path);

@@ -224,8 +224,45 @@ bool SDLCALL Close(void *data)
     return result == FS_ERROR_OK || SDL_SetError("Wii U asset close failed: %d", result);
 }
 
-Stream *OpenNativeAsset(const SDL_EMFS_AssetEntry &entry)
+// Called with asset_metadata_lock held. Refresh only native snapshots for
+// existing immutable assets: names, sizes and the logical index stay unchanged.
+bool RefreshDirectory(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &asset, FSAClientHandle client)
 {
+    const size_t slash = asset.path.find_last_of('/');
+    const std::string parent = slash == 0 ? "/" : asset.path.substr(0, slash);
+    std::string root = context->asset_root.front() == '/' ? context->asset_root : "/vol/content/" + context->asset_root;
+    while (root.size() > 1 && root.back() == '/')
+        root.pop_back();
+    const std::string relative_parent = parent.substr(root.size());
+    FSADirectoryHandle directory;
+    if (FSAOpenDir(client, parent.c_str(), &directory) != FS_ERROR_OK)
+        return false;
+    bool found = false;
+    FSError result;
+    FSADirectoryEntry entry;
+    while ((result = FSAReadDir(client, directory, &entry)) == FS_ERROR_OK)
+    {
+        if (SDL_strcmp(entry.name, ".") == 0 || SDL_strcmp(entry.name, "..") == 0)
+            continue;
+        std::string logical;
+        if (!SDL_EMFS_NormalizePath((relative_parent + '/' + entry.name).c_str(), logical))
+            continue;
+        auto it = context->assets.find(logical);
+        if (it != context->assets.end())
+        {
+            it->second.native_stat = entry.info;
+            found |= &it->second == &asset;
+        }
+    }
+    FSError closed = FSACloseDir(client, directory);
+    return found && result == FS_ERROR_END_OF_DIR && closed == FS_ERROR_OK;
+}
+
+Stream *OpenNativeAsset(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &entry)
+{
+    // Serialize snapshot use and refresh so concurrent opens do not rescan the
+    // same invalidated directory or race updates to a native stat blob.
+    std::unique_lock<std::mutex> metadata_lock(context->asset_metadata_lock);
     // Native open-by-stat consumes the filesystem cookie in the reserved tail.
     // Synthesized metadata (for example Aroma RomFS) has no native cookie.
     const auto *raw = reinterpret_cast<const Uint8 *>(&entry.native_stat);
@@ -251,6 +288,15 @@ Stream *OpenNativeAsset(const SDL_EMFS_AssetEntry &entry)
     }
     FSStat stat = entry.native_stat;
     FSError result = FSAOpenFileByStat(s->client, &stat, "r", entry.path.c_str(), &s->handle);
+    // IOS invalidates retained FAT metadata after successful writable closes,
+    // including writes outside the asset root. Re-enumeration renews sibling
+    // snapshots without resolving every filename or interpreting opaque cookies.
+    if (result == FS_ERROR_UNAVAILABLE_COMMAND && RefreshDirectory(context, entry, s->client))
+    {
+        stat = entry.native_stat;
+        result = FSAOpenFileByStat(s->client, &stat, "r", entry.path.c_str(), &s->handle);
+    }
+    metadata_lock.unlock();
     // An unsupported fast-open is a returned error here. The FS facade instead
     // enters a permanent fatal-state wait for UNAVAILABLE_COMMAND, even with
     // FS_ERROR_FLAG_ALL. Resolve normally on the same client in that case.
@@ -282,9 +328,9 @@ Stream *OpenNativeAsset(const SDL_EMFS_AssetEntry &entry)
 }
 } // namespace
 
-SDL_IOStream *SDL_EMFS_WiiUOpenAsset(const SDL_EMFS_AssetEntry &entry)
+SDL_IOStream *SDL_EMFS_WiiUOpenAsset(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &entry)
 {
-    Stream *s = OpenNativeAsset(entry);
+    Stream *s = OpenNativeAsset(context, entry);
     if (!s)
         return nullptr;
     SDL_IOStreamInterface iface;
@@ -306,9 +352,9 @@ void SDL_EMFS_QueueCompletion(SDL_EMFS_Context *context, SDL_EMFS_AsyncOperation
     SDL_UnlockMutex(context->completion_lock);
 }
 
-void *SDL_EMFS_WiiUOpenAsyncAsset(const SDL_EMFS_AssetEntry &entry)
+void *SDL_EMFS_WiiUOpenAsyncAsset(SDL_EMFS_Context *context, const SDL_EMFS_AssetEntry &entry)
 {
-    return OpenNativeAsset(entry);
+    return OpenNativeAsset(context, entry);
 }
 
 bool SDL_EMFS_WiiUCloseAsyncAsset(void *asset)
@@ -428,7 +474,7 @@ void SDL_EMFS_WiiUReadAsync(SDL_EMFS_AsyncOperation *operation, Uint64 offset)
 
 bool SDL_EMFS_WiiULoadAsync(SDL_EMFS_AsyncOperation *operation, const SDL_EMFS_AssetEntry &entry)
 {
-    Stream *stream = OpenNativeAsset(entry);
+    Stream *stream = OpenNativeAsset(operation->context, entry);
     if (!stream)
         return false;
     auto *file = new (std::nothrow) SDL_EMFS_AsyncFile;
