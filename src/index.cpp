@@ -4,6 +4,10 @@
 
 #include <cstring>
 
+#ifdef SDL_PLATFORM_WIIU
+#include <coreinit/filesystem.h>
+#endif
+
 namespace {
 
 struct ScanData
@@ -16,19 +20,13 @@ struct ScanData
 
 bool ScanDirectory(SDL_EMFS_Context *context, const std::string &physical_directory, const std::string &logical_directory, bool asset);
 
-SDL_EnumerationResult SDLCALL ScanCallback(void *userdata, const char *dirname, const char *fname)
+#ifndef SDL_PLATFORM_WIIU
+SDL_EnumerationResult IndexEntry(ScanData *data, const char *dirname, const char *fname, const SDL_PathInfo &info)
 {
-    ScanData *data = static_cast<ScanData *>(userdata);
     const std::string physical_path = std::string(dirname) + fname;
     std::string logical_path;
     const std::string unnormalized = data->logical_directory.empty() ? fname : data->logical_directory + '/' + fname;
     if (!SDL_EMFS_NormalizePath(unnormalized.c_str(), logical_path)) {
-        data->success = false;
-        return SDL_ENUM_FAILURE;
-    }
-
-    SDL_PathInfo info;
-    if (!SDL_GetPathInfo(physical_path.c_str(), &info)) {
         data->success = false;
         return SDL_ENUM_FAILURE;
     }
@@ -54,10 +52,102 @@ SDL_EnumerationResult SDLCALL ScanCallback(void *userdata, const char *dirname, 
     return SDL_ENUM_CONTINUE;
 }
 
+SDL_EnumerationResult SDLCALL ScanCallback(void *userdata, const char *dirname, const char *fname)
+{
+    SDL_PathInfo info;
+    if (!SDL_GetPathInfo((std::string(dirname) + fname).c_str(), &info)) {
+        static_cast<ScanData *>(userdata)->success = false;
+        return SDL_ENUM_FAILURE;
+    }
+    return IndexEntry(static_cast<ScanData *>(userdata), dirname, fname, info);
+}
+#else
+// Reuse one native client through recursive scans. Each level has its own
+// command block and directory handle, so recursion preserves directory position.
+bool ScanWiiUDirectory(ScanData *data, const std::string &path, FSClient *client)
+{
+    FSCmdBlock block;
+    FSInitCmdBlock(&block);
+    FSDirectoryHandle handle;
+    FSStatus status = FSOpenDir(client, &block, path.c_str(), &handle, FS_ERROR_FLAG_ALL);
+    if (status != FS_STATUS_OK) {
+        return SDL_SetError("FSOpenDir(%s) failed: %d", path.c_str(), status);
+    }
+    const std::string dirname = path + (path.back() == '/' ? "" : "/");
+    bool success = true;
+    for (;;) {
+        FSDirectoryEntry entry{};
+        status = FSReadDir(client, &block, handle, &entry, FS_ERROR_FLAG_ALL);
+        if (status == FS_STATUS_END) {
+            break;
+        }
+        if (status != FS_STATUS_OK) {
+            success = SDL_SetError("FSReadDir(%s) failed: %d", path.c_str(), status);
+            break;
+        }
+        if (SDL_strcmp(entry.name, ".") == 0 || SDL_strcmp(entry.name, "..") == 0) {
+            continue;
+        }
+        const FSStat &stat = entry.info;
+        SDL_PathInfo info{};
+        info.type = (stat.flags & FS_STAT_LINK) ? SDL_PATHTYPE_OTHER :
+                    (stat.flags & FS_STAT_DIRECTORY) ? SDL_PATHTYPE_DIRECTORY : SDL_PATHTYPE_FILE;
+        info.size = info.type == SDL_PATHTYPE_DIRECTORY ? 0 : stat.size;
+        info.create_time = (static_cast<SDL_Time>(stat.created) + 315532800000000LL) * 1000;
+        info.modify_time = (static_cast<SDL_Time>(stat.modified) + 315532800000000LL) * 1000;
+        info.access_time = info.modify_time;
+        // Directory metadata belongs to this entry already. Do not resolve the
+        // name again with SDL_GetPathInfo/FSGetStat.
+        std::string logical;
+        const std::string unnormalized = data->logical_directory.empty() ? entry.name : data->logical_directory + '/' + entry.name;
+        if (!SDL_EMFS_NormalizePath(unnormalized.c_str(), logical)) {
+            success = false;
+            break;
+        }
+        if (data->asset && info.type == SDL_PATHTYPE_FILE) {
+            SDL_EMFS_AssetEntry asset;
+            asset.path = dirname + entry.name;
+            asset.info = info;
+            data->context->assets.emplace(logical, std::move(asset));
+        } else if (!data->asset) {
+            data->context->user_paths.emplace(logical, dirname + entry.name);
+        }
+        if (info.type == SDL_PATHTYPE_DIRECTORY) {
+            ScanData child{data->context, logical, data->asset, true};
+            if (!ScanWiiUDirectory(&child, dirname + entry.name, client)) {
+                success = false;
+                break;
+            }
+        }
+    }
+    const FSStatus closed = FSCloseDir(client, &block, handle, FS_ERROR_FLAG_ALL);
+    return success && (closed == FS_STATUS_OK || SDL_SetError("FSCloseDir failed: %d", closed));
+}
+#endif
+
 bool ScanDirectory(SDL_EMFS_Context *context, const std::string &physical_directory, const std::string &logical_directory, bool asset)
 {
     ScanData data{ context, logical_directory, asset, true };
+#ifdef SDL_PLATFORM_WIIU
+    FSInit();
+    auto *client = static_cast<FSClient *>(SDL_calloc(1, sizeof(FSClient)));
+    if (!client) {
+        return false;
+    }
+    const FSStatus status = FSAddClient(client, FS_ERROR_FLAG_ALL);
+    if (status != FS_STATUS_OK) {
+        SDL_free(client);
+        return SDL_SetError("FSAddClient failed: %d", status);
+    }
+    // Match SDL's native relative-path base without changing the supplied root.
+    const std::string path = physical_directory.front() == '/' ? physical_directory : "/vol/content/" + physical_directory;
+    const bool success = ScanWiiUDirectory(&data, path, client);
+    FSDelClient(client, FS_ERROR_FLAG_ALL);
+    SDL_free(client);
+    return success;
+#else
     return SDL_EnumerateDirectory(physical_directory.c_str(), ScanCallback, &data) && data.success;
+#endif
 }
 
 Uint32 ReadU32(const Uint8 *data)

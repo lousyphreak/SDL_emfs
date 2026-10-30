@@ -133,6 +133,14 @@ precision and persists the web working filesystem.
 the generic SDL backend returns `SDL_MAX_UINT64` for an unknown amount, so it
 is not a filesystem free-space or browser quota query.
 
+## Wii U native indexing
+
+Wii U scans use the metadata returned by `FSReadDir` to build the same asset
+and user-path indexes as other native platforms. They do not issue a separate
+pathname stat for each directory entry. Directory recursion retains one native
+client and separate directory handles. Asset and user APIs are unchanged;
+mutable user-path queries still consult the filesystem.
+
 ## Web asset server
 
 The web asset root must expose `.sdl-emfs/manifest.bin`, lowercase URL mapping,
