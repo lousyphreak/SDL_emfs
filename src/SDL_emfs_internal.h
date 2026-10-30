@@ -8,6 +8,10 @@
 #include <SDL_emfs/SDL_emfs_async.h>
 #include <SDL_emfs/SDL_emfs_sync.h>
 
+#ifdef SDL_PLATFORM_WIIU
+#include <coreinit/filesystem.h>
+#endif
+
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -19,6 +23,9 @@ struct SDL_EMFS_AssetEntry
     std::string path;
     std::string etag;
     SDL_PathInfo info{};
+#ifdef SDL_PLATFORM_WIIU
+    FSStat native_stat{};
+#endif
 };
 
 struct SDL_EMFS_AssetDirectory
@@ -86,10 +93,13 @@ struct SDL_EMFS_Context
 
 #ifndef __EMSCRIPTEN__
     SDL_AsyncIOQueue *async_queue = nullptr;
-#else
+#endif
+#if defined(__EMSCRIPTEN__) || defined(SDL_PLATFORM_WIIU)
     SDL_Mutex *completion_lock = nullptr;
     std::vector<SDL_EMFS_AsyncOperation *> completions;
+#ifdef __EMSCRIPTEN__
     std::vector<SDL_EMFS_AsyncOperation *> readiness_waiters;
+#endif
 #endif
 };
 
@@ -119,6 +129,9 @@ struct SDL_EMFS_AsyncFile
     Uint64 size = 0;
     bool asset = false;
     bool writable = false;
+#ifdef SDL_PLATFORM_WIIU
+    void *wiiu_asset = nullptr;
+#endif
     bool busy = false;
 };
 
@@ -137,6 +150,17 @@ bool SDL_EMFS_IsAssetMode(const char *mode);
 bool SDL_EMFS_IsReadOnlyMode(const char *mode);
 bool SDL_EMFS_IsWritableMode(const char *mode);
 bool SDL_EMFS_IsPreservingMode(const char *mode);
+
+#ifdef SDL_PLATFORM_WIIU
+SDL_IOStream *SDL_EMFS_WiiUOpenAsset(const SDL_EMFS_AssetEntry &entry);
+void *SDL_EMFS_WiiUOpenAsyncAsset(const SDL_EMFS_AssetEntry &entry);
+bool SDL_EMFS_WiiULoadAsync(SDL_EMFS_AsyncOperation *operation, const SDL_EMFS_AssetEntry &entry);
+void SDL_EMFS_WiiUReadAsync(SDL_EMFS_AsyncOperation *operation, Uint64 offset);
+bool SDL_EMFS_WiiUCloseAsyncAsset(void *asset);
+void SDL_EMFS_QueueCompletion(SDL_EMFS_Context *context, SDL_EMFS_AsyncOperation *operation);
+#endif
+SDL_IOStream *SDL_EMFS_OpenAssetStream(const SDL_EMFS_AssetEntry &entry, const char *mode);
+void *SDL_EMFS_LoadAsset(const SDL_EMFS_AssetEntry &entry, size_t *size);
 
 SDL_EMFS_File *SDL_EMFS_OpenResolved(SDL_EMFS_Context *context, SDL_EMFS_Root root, const std::string &path, const char *mode);
 bool SDL_EMFS_PrepareOpen(SDL_EMFS_Context *context, SDL_EMFS_Root root, const std::string &path, const char *mode, bool &asset, std::string &physical_path);

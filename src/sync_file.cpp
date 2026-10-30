@@ -29,7 +29,7 @@ SDL_EMFS_File *OpenAsset(SDL_EMFS_Context *context, const std::string &path, con
     file->size = found->second.info.size;
     file->asset = true;
 #ifndef __EMSCRIPTEN__
-    file->stream = SDL_IOFromFile(found->second.path.c_str(), mode);
+    file->stream = SDL_EMFS_OpenAssetStream(found->second, mode);
     if (!file->stream) {
         delete file;
         return nullptr;
@@ -49,7 +49,7 @@ bool MaterializeAsset(SDL_EMFS_Context *context, const std::string &path, const 
 #ifdef __EMSCRIPTEN__
     data = SDL_EMFS_WebLoad(context, asset->second, &size);
 #else
-    data = SDL_LoadFile(asset->second.path.c_str(), &size);
+    data = SDL_EMFS_LoadAsset(asset->second, &size);
 #endif
     if (!data) {
         return false;
@@ -126,6 +126,22 @@ SDL_IOStream *OpenCustomIO(SDL_EMFS_File *file)
 #endif
 
 } // namespace
+
+SDL_IOStream *SDL_EMFS_OpenAssetStream(const SDL_EMFS_AssetEntry &entry, const char *mode)
+{
+#ifdef SDL_PLATFORM_WIIU
+    if (SDL_IOStream *stream = SDL_EMFS_WiiUOpenAsset(entry)) {
+        return stream;
+    }
+#endif
+    return SDL_IOFromFile(entry.path.c_str(), mode);
+}
+
+void *SDL_EMFS_LoadAsset(const SDL_EMFS_AssetEntry &entry, size_t *size)
+{
+    SDL_IOStream *stream = SDL_EMFS_OpenAssetStream(entry, "rb");
+    return stream ? SDL_LoadFile_IO(stream, size, true) : nullptr;
+}
 
 SDL_EMFS_File *SDL_EMFS_OpenResolved(SDL_EMFS_Context *context, SDL_EMFS_Root root, const std::string &path, const char *mode)
 {
@@ -475,6 +491,6 @@ void *SDL_EMFS_LoadFile(SDL_EMFS_Context *context, SDL_EMFS_Root root, const cha
 #ifdef __EMSCRIPTEN__
     return SDL_EMFS_WebLoad(context, found->second, size);
 #else
-    return SDL_LoadFile(found->second.path.c_str(), size);
+    return SDL_EMFS_LoadAsset(found->second, size);
 #endif
 }

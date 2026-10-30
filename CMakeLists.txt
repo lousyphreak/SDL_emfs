@@ -18,6 +18,7 @@ add_library(SDL_emfs STATIC
     src/index.cpp
     src/native.cpp
     src/path.cpp
+    src/wiiu.cpp
     src/sync_file.cpp
 )
 add_library(SDL_emfs::SDL_emfs ALIAS SDL_emfs)

@@ -108,6 +108,7 @@ bool ScanWiiUDirectory(ScanData *data, const std::string &path, FSClient *client
             SDL_EMFS_AssetEntry asset;
             asset.path = dirname + entry.name;
             asset.info = info;
+            asset.native_stat = stat;
             data->context->assets.emplace(logical, std::move(asset));
         } else if (!data->asset) {
             data->context->user_paths.emplace(logical, dirname + entry.name);

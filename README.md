@@ -133,13 +133,32 @@ precision and persists the web working filesystem.
 the generic SDL backend returns `SDL_MAX_UINT64` for an unknown amount, so it
 is not a filesystem free-space or browser quota query.
 
-## Wii U native indexing
+## Wii U native assets
 
 Wii U scans use the metadata returned by `FSReadDir` to build the same asset
 and user-path indexes as other native platforms. They do not issue a separate
 pathname stat for each directory entry. Directory recursion retains one native
 client and separate directory handles. Asset and user APIs are unchanged;
 mutable user-path queries still consult the filesystem.
+
+The immutable asset index retains Cafe FS's native directory metadata. Native
+asset streams use `FSOpenFileByStat` to reuse that lookup instead of searching
+the directory by pathname on each open. This is confined to the existing
+immutable-asset contract: asset contents and directory entries must remain stable
+while the context is in use. Mutable user files continue through SDL's ordinary
+filesystem APIs.
+
+Streams retain two aligned 64 KiB regions with asynchronous read-ahead. Bulk
+reads use the caller's buffer and size when aligned; unaligned reads bounce in
+batches up to 1 MiB. Close drains read-ahead before releasing native resources.
+Async opens, positioned reads and whole-file loads use the same indexed native
+open, with completions delivered by `SDL_EMFS_Pump`. Native callbacks do not run
+synchronous file cleanup on the AppIO thread.
+
+Synthesized directory metadata without a native filesystem cookie, such as
+Aroma's redirected content metadata, uses ordinary SDL streams and AsyncIO.
+No SDL or SDL_emfs public API changes, application hints or path-specific rules
+are required.
 
 ## Web asset server
 

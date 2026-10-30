@@ -74,6 +74,14 @@ SDL_EMFS_Context *SDL_EMFS_Create(const SDL_EMFS_Config *config)
     }
     SDL_EMFS_WebStartInitialization(context);
 #else
+#ifdef SDL_PLATFORM_WIIU
+    context->completion_lock = SDL_CreateMutex();
+    if (!context->completion_lock) {
+        context->initialization_error = SDL_GetError();
+        context->initialization_complete = true;
+        return context;
+    }
+#endif
     context->async_queue = SDL_CreateAsyncIOQueue();
     if (!context->async_queue) {
         context->initialization_error = SDL_GetError();
@@ -100,6 +108,10 @@ void SDL_EMFS_Destroy(SDL_EMFS_Context *context)
         SDL_DestroyAsyncIOQueue(context->async_queue);
     }
 #else
+    SDL_assert(context->completions.empty());
+    SDL_DestroyMutex(context->completion_lock);
+#endif
+#ifdef SDL_PLATFORM_WIIU
     SDL_assert(context->completions.empty());
     SDL_DestroyMutex(context->completion_lock);
 #endif

@@ -98,6 +98,15 @@ void DeliverOperation(SDL_EMFS_AsyncOperation *operation)
         break;
     }
     case SDL_EMFS_OperationType::Load:
+#ifdef SDL_PLATFORM_WIIU
+        // Native FS callbacks run on AppIO. Synchronous close must run here on
+        // the Pump caller, where its completion can still be dispatched.
+        if (operation->file) {
+            SDL_EMFS_WiiUCloseAsyncAsset(operation->file->wiiu_asset);
+            delete operation->file;
+            operation->file = nullptr;
+        }
+#endif
         operation->load_callback(operation->userdata, operation->result, operation->buffer, operation->size);
         break;
     case SDL_EMFS_OperationType::Completion:
@@ -258,6 +267,15 @@ void SDL_EMFS_OpenAsync(SDL_EMFS_Context *context, SDL_EMFS_Root root, const cha
         file->size = size >= 0 ? (Uint64)size : 0;
     }
 #else
+#ifdef SDL_PLATFORM_WIIU
+    if (asset) {
+        file->wiiu_asset = SDL_EMFS_WiiUOpenAsyncAsset(context->assets.find(normalized)->second);
+        if (file->wiiu_asset) {
+            callback(userdata, file);
+            return;
+        }
+    }
+#endif
     file->stream = SDL_AsyncIOFromFile(physical_path.c_str(), mode);
     if (!file->stream) {
         delete file;
@@ -277,6 +295,9 @@ Sint64 SDL_EMFS_GetAsyncFileSize(SDL_EMFS_AsyncFile *file)
         return -1;
     }
     SDL_assert(!file->busy);
+#ifdef SDL_PLATFORM_WIIU
+    if (file->wiiu_asset) return file->size;
+#endif
 #ifdef __EMSCRIPTEN__
     return file->asset ? (Sint64)file->size : SDL_GetIOSize(file->stream);
 #else
@@ -309,6 +330,14 @@ void SDL_EMFS_ReadAtAsync(SDL_EMFS_AsyncFile *file, Uint64 offset, void *destina
         SDL_EMFS_QueueCompletion(file->context, operation);
     }
 #else
+#ifdef SDL_PLATFORM_WIIU
+    if (file->wiiu_asset) {
+        operation->buffer = destination;
+        operation->size = SDL_min(length, offset < file->size ? file->size - offset : 0);
+        SDL_EMFS_WiiUReadAsync(operation, offset);
+        return;
+    }
+#endif
     if (!SDL_ReadAsyncIO(file->stream, destination, offset, length, file->context->async_queue, operation)) {
         FatalSubmission("could not submit async read");
     }
@@ -340,6 +369,14 @@ void SDL_EMFS_WriteAtAsync(SDL_EMFS_AsyncFile *file, Uint64 offset, const void *
     }
     SDL_EMFS_QueueCompletion(file->context, operation);
 #else
+#ifdef SDL_PLATFORM_WIIU
+    if (file->wiiu_asset) {
+        operation->result = SDL_ASYNCIO_FAILURE;
+        operation->error = "Asset files are read-only";
+        SDL_EMFS_QueueCompletion(file->context, operation);
+        return;
+    }
+#endif
     if (!SDL_WriteAsyncIO(file->stream, const_cast<void *>(source), offset, length, file->context->async_queue, operation)) {
         FatalSubmission("could not submit async write");
     }
@@ -366,6 +403,15 @@ void SDL_EMFS_CloseAsync(SDL_EMFS_AsyncFile *file, SDL_EMFS_CompletionCallback c
         SDL_EMFS_QueueCompletion(file->context, operation);
     }
 #else
+#ifdef SDL_PLATFORM_WIIU
+    if (file->wiiu_asset) {
+        operation->success = SDL_EMFS_WiiUCloseAsyncAsset(file->wiiu_asset);
+        file->wiiu_asset = nullptr;
+        if (!operation->success) SetOperationError(operation);
+        SDL_EMFS_QueueCompletion(file->context, operation);
+        return;
+    }
+#endif
     if (!SDL_CloseAsyncIO(file->stream, file->writable, file->context->async_queue, operation)) {
         FatalSubmission("could not submit async close");
     }
@@ -418,6 +464,9 @@ void SDL_EMFS_LoadFileAsync(SDL_EMFS_Context *context, SDL_EMFS_Root root, const
         SDL_EMFS_QueueCompletion(context, operation);
     }
 #else
+#ifdef SDL_PLATFORM_WIIU
+    if (asset && SDL_EMFS_WiiULoadAsync(operation, entry->second)) return;
+#endif
     if (!SDL_LoadFileAsync(physical_path.c_str(), context->async_queue, operation)) {
         operation->result = SDL_ASYNCIO_FAILURE;
         SetOperationError(operation);
@@ -536,7 +585,7 @@ void SDL_EMFS_Pump(SDL_EMFS_Context *context)
     if (!context) {
         return;
     }
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(SDL_PLATFORM_WIIU)
     std::vector<SDL_EMFS_AsyncOperation *> completions;
     SDL_LockMutex(context->completion_lock);
     completions.swap(context->completions);
@@ -551,7 +600,8 @@ void SDL_EMFS_Pump(SDL_EMFS_Context *context)
         }
         SDL_UnlockMutex(context->completion_lock);
     }
-#else
+#endif
+#ifndef __EMSCRIPTEN__
     SDL_AsyncIOOutcome outcome;
     while (SDL_GetAsyncIOResult(context->async_queue, &outcome)) {
         ProcessNativeOutcome(outcome);
