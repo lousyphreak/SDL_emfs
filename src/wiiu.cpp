@@ -3,10 +3,12 @@
 
 #ifdef SDL_PLATFORM_WIIU
 #include <new>
+#include <coreinit/filesystem_fsa.h>
 
-// Exported by coreinit; the WUT FS facade does not yet declare this entry point.
-extern "C" FSStatus FSOpenFileByStat(FSClient *, FSCmdBlock *, FSStat *, const char *, const char *, FSFileHandle *, FSErrorFlag);
-extern "C" void FSCancelCommand(FSClient *, FSCmdBlock *);
+// Exported by coreinit with the callback/context/queue layout also used for
+// FSA attach notifications. WUT currently declares only synchronous reads.
+extern "C" FSError FSAReadFileWithPosAsync(FSAClientHandle, void *, uint32_t, uint32_t, uint32_t, FSAFileHandle, uint32_t,
+                                           FSAClientAttachAsyncData *);
 
 namespace
 {
@@ -19,12 +21,10 @@ struct Region
     Uint8 *buffer;
     Uint64 offset = SDL_MAX_UINT64;
     Sint32 bytes = 0;
-    FSCmdBlock command;
 };
 struct Stream
 {
-    FSClient client;
-    FSCmdBlock command;
+    FSAClientHandle client;
     FSFileHandle handle;
     Uint64 position = 0;
     Uint64 size;
@@ -37,12 +37,12 @@ struct Stream
     size_t bounce_size = 0;
 };
 
-void ReadComplete(FSClient *, FSCmdBlock *, FSStatus result, uint32_t param)
+void ReadComplete(FSError result, FSACommand, FSARequest *, FSAResponse *, void *param)
 {
-    auto *region = reinterpret_cast<Region *>(param);
+    auto *region = static_cast<Region *>(param);
     Stream *stream = region->owner;
     SDL_LockMutex(stream->lock);
-    region->bytes = result == FS_STATUS_END ? 0 : result;
+    region->bytes = result == FS_ERROR_END_OF_FILE ? 0 : result;
     stream->pending = nullptr;
     SDL_BroadcastCondition(stream->condition);
     SDL_UnlockMutex(stream->lock);
@@ -76,8 +76,8 @@ size_t Transfer(Stream *s, void *destination, Uint64 offset, size_t length, SDL_
             break;
         }
         Uint8 *buffer = aligned ? out + total : s->bounce;
-        FSStatus result = FSReadFileWithPos(&s->client, &s->command, buffer, 1, amount, offset + total, s->handle, 0, FS_ERROR_FLAG_ALL);
-        if (result == FS_STATUS_END || result == 0)
+        FSError result = FSAReadFileWithPos(s->client, buffer, 1, amount, offset + total, s->handle, 0);
+        if (result == FS_ERROR_END_OF_FILE || result == 0)
             break;
         if (result < 0)
         {
@@ -191,12 +191,10 @@ size_t SDLCALL Read(void *data, void *destination, size_t length, SDL_IOStatus *
         {
             other->offset = next;
             other->bytes = 0;
-            FSInitCmdBlock(&other->command);
-            FSAsyncData async{ReadComplete, reinterpret_cast<uint32_t>(other), nullptr};
+            FSAClientAttachAsyncData async{ReadComplete, other, nullptr};
             s->pending = other;
-            FSStatus result = FSReadFileWithPosAsync(&s->client, &other->command, other->buffer, 1, RegionSize, next, s->handle, 0,
-                                                     FS_ERROR_FLAG_ALL, &async);
-            if (result != FS_STATUS_OK)
+            FSError result = FSAReadFileWithPosAsync(s->client, other->buffer, 1, RegionSize, next, s->handle, 0, &async);
+            if (result != FS_ERROR_OK)
             {
                 s->pending = nullptr;
                 other->offset = SDL_MAX_UINT64;
@@ -213,19 +211,17 @@ bool SDLCALL Close(void *data)
 {
     auto *s = static_cast<Stream *>(data);
     SDL_LockMutex(s->lock);
-    if (s->pending)
-        FSCancelCommand(&s->client, &s->pending->command);
     while (s->pending)
         SDL_WaitCondition(s->condition, s->lock);
     SDL_UnlockMutex(s->lock);
-    FSStatus result = FSCloseFile(&s->client, &s->command, s->handle, FS_ERROR_FLAG_ALL);
-    FSDelClient(&s->client, FS_ERROR_FLAG_ALL);
+    FSError result = FSACloseFile(s->client, s->handle);
+    FSADelClient(s->client);
     SDL_aligned_free(s->bounce);
     SDL_aligned_free(s->cache);
     SDL_DestroyCondition(s->condition);
     SDL_DestroyMutex(s->lock);
     delete s;
-    return result == FS_STATUS_OK || SDL_SetError("Wii U asset close failed: %d", result);
+    return result == FS_ERROR_OK || SDL_SetError("Wii U asset close failed: %d", result);
 }
 
 Stream *OpenNativeAsset(const SDL_EMFS_AssetEntry &entry)
@@ -245,20 +241,26 @@ Stream *OpenNativeAsset(const SDL_EMFS_AssetEntry &entry)
         SDL_OutOfMemory();
         return nullptr;
     }
-    FSInit();
-    FSStatus result = FSAddClient(&s->client, FS_ERROR_FLAG_ALL);
-    if (result != FS_STATUS_OK)
+    FSAInit();
+    s->client = FSAAddClient(nullptr);
+    if (s->client < 0)
     {
         delete s;
-        SDL_SetError("FSAddClient failed: %d", result);
+        SDL_SetError("FSAAddClient failed");
         return nullptr;
     }
-    FSInitCmdBlock(&s->command);
     FSStat stat = entry.native_stat;
-    result = FSOpenFileByStat(&s->client, &s->command, &stat, "r", entry.path.c_str(), &s->handle, FS_ERROR_FLAG_ALL);
-    if (result != FS_STATUS_OK)
+    FSError result = FSAOpenFileByStat(s->client, &stat, "r", entry.path.c_str(), &s->handle);
+    // An unsupported fast-open is a returned error here. The FS facade instead
+    // enters a permanent fatal-state wait for UNAVAILABLE_COMMAND, even with
+    // FS_ERROR_FLAG_ALL. Resolve normally on the same client in that case.
+    if (result == FS_ERROR_UNAVAILABLE_COMMAND || result == FS_ERROR_UNSUPPORTED_COMMAND)
     {
-        FSDelClient(&s->client, FS_ERROR_FLAG_ALL);
+        result = FSAOpenFileEx(s->client, entry.path.c_str(), "r", FS_MODE_READ_OWNER, FS_OPEN_FLAG_NONE, 0, &s->handle);
+    }
+    if (result != FS_ERROR_OK)
+    {
+        FSADelClient(s->client);
         delete s;
         return nullptr;
     }
@@ -347,11 +349,11 @@ void Finish(AsyncRead *read)
 }
 
 void Submit(AsyncRead *read);
-void AsyncComplete(FSClient *, FSCmdBlock *, FSStatus result, uint32_t param)
+void AsyncComplete(FSError result, FSACommand, FSARequest *, FSAResponse *, void *param)
 {
     auto *read = reinterpret_cast<AsyncRead *>(param);
     auto *op = read->operation;
-    if (result < 0 && result != FS_STATUS_END)
+    if (result < 0 && result != FS_ERROR_END_OF_FILE)
     {
         op->result = SDL_ASYNCIO_FAILURE;
         op->error = "Wii U asynchronous asset read failed: " + std::to_string(result);
@@ -391,11 +393,9 @@ void Submit(AsyncRead *read)
         Finish(read);
         return;
     }
-    FSInitCmdBlock(&s->command);
-    FSAsyncData async{AsyncComplete, reinterpret_cast<uint32_t>(read), nullptr};
-    FSStatus result = FSReadFileWithPosAsync(&s->client, &s->command, read->bounced ? s->bounce : out, 1, read->amount, position, s->handle,
-                                             0, FS_ERROR_FLAG_ALL, &async);
-    if (result != FS_STATUS_OK)
+    FSAClientAttachAsyncData async{AsyncComplete, read, nullptr};
+    FSError result = FSAReadFileWithPosAsync(s->client, read->bounced ? s->bounce : out, 1, read->amount, position, s->handle, 0, &async);
+    if (result != FS_ERROR_OK)
     {
         op->result = SDL_ASYNCIO_FAILURE;
         op->error = "Wii U asynchronous asset submission failed: " + std::to_string(result);

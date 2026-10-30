@@ -142,8 +142,13 @@ client and separate directory handles. Asset and user APIs are unchanged;
 mutable user-path queries still consult the filesystem.
 
 The immutable asset index retains Cafe FS's native directory metadata. Native
-asset streams use `FSOpenFileByStat` to reuse that lookup instead of searching
-the directory by pathname on each open. This is confined to the existing
+asset streams use `FSAOpenFileByStat` to reuse that lookup instead of searching
+the directory by pathname on each open. The FSA facade returns unavailable or
+unsupported fast-open errors directly; these fall back to ordinary native open
+on the same client, retaining the stream cache and read-ahead. The higher-level
+FS facade can enter a permanent fatal-state wait for an unavailable fast-open,
+so asset streams consistently use FSA for opening, reading and closing.
+This is confined to the existing
 immutable-asset contract: asset contents and directory entries must remain stable
 while the context is in use. Mutable user files continue through SDL's ordinary
 filesystem APIs.
